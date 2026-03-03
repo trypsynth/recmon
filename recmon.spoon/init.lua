@@ -65,7 +65,35 @@ local function cpuUsage()
     )
 end
 
-local function ramUsage() end
+local function ramUsage()
+    local stats = hs.host.vmStat()
+    local totalMemory = stats.memSize
+    local reclaimable = (stats.pagesFree + stats.pagesInactive + stats.pagesSpeculative + stats.pagesPurgeable) * stats.pageSize
+    local usedMemory = totalMemory - reclaimable
+    local res = "Physical: "
+        .. bytesToHuman(usedMemory)
+        .. " of "
+        .. bytesToHuman(totalMemory)
+        .. " used ("
+        .. percent(usedMemory, totalMemory)
+        .. "%). "
+    local swapOutput = hs.execute("sysctl -n vm.swapusage")
+    local swapUsed = swapOutput:match("used = ([%d%.]+)M")
+    local swapUsedMB = tonumber(swapUsed) or 0
+    if swapUsedMB > 0 then
+        local swapTotal = swapOutput:match("total = ([%d%.]+)M")
+        local swapTotalMB = tonumber(swapTotal) or 0
+        res = res
+            .. "Swap: "
+            .. bytesToHuman(swapUsedMB * 1024 * 1024)
+            .. " of "
+            .. bytesToHuman(swapTotalMB * 1024 * 1024)
+            .. " used."
+    else
+        res = res .. "Swap: 0 bytes used."
+    end
+    speak(res)
+end
 
 local function diskUsage()
     local disks = hs.host.volumeInformation()
