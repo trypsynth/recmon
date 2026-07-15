@@ -102,27 +102,95 @@ local function uptime()
     speak(hs.execute(hs.spoons.scriptPath() .. "/uptime.sh"))
 end
 
+-- Battery time-remaining, working around a macOS 26/27 regression.
+--
+-- hs.battery.timeRemaining() / timeToFullCharge() (and `pmset`, Activity Monitor)
+-- read the high-level IOPowerSources API, which on macOS 27 returns -1 /
+-- "no estimate". But the battery firmware's own estimate is still published in
+-- the raw AppleSmartBattery IORegistry node, so we read that directly. We also
+-- read the raw charge/capacity so we can compute an independent estimate as a
+-- fallback (and cross-check) if the firmware value is missing.
+local function readSmartBattery()
+    local out = hs.execute("/usr/sbin/ioreg -rn AppleSmartBattery -w0 2>/dev/null")
+    if not out or out == "" then return nil end
+    local function num(key)
+        -- these fields are all small positive integers (mAh / minutes), so plain
+        -- tonumber is safe; we deliberately do NOT parse Amperage from here, as it
+        -- arrives as an unsigned 64-bit value that loses precision as a Lua float.
+        local v = out:match('"' .. key .. '"%s*=%s*(%d+)')
+        return v and tonumber(v)
+    end
+    return {
+        remaining  = num("RemainingCapacity"),      -- mAh left
+        full       = num("NominalChargeCapacity")   -- mAh at full (wear-adjusted)
+                     or num("AppleRawMaxCapacity"),
+        avgToEmpty = num("AvgTimeToEmpty"),          -- firmware estimate, minutes
+        avgToFull  = num("AvgTimeToFull"),           -- firmware estimate, minutes
+    }
+end
+
+-- Returns estimated minutes remaining (until empty when charging=false, until
+-- full when charging=true), or nil if it genuinely can't be determined yet.
+--
+-- Three layers, best source first, so this is a no-op change on macOS <= 26:
+--   1. The standard hs.battery API. On macOS <= 26 (and if Apple ever fixes 27)
+--      this returns a valid estimate and we use it, unchanged from before.
+--   2. macOS 27 breaks that API (returns -1). Fall back to the battery firmware's
+--      own estimate, read from the raw AppleSmartBattery IORegistry node.
+--   3. If even that is missing, compute it ourselves from raw charge / current.
+local function batteryMinutesRemaining(charging)
+    -- Layer 1: the OS estimate. -1 means "no estimate" (the macOS 27 regression);
+    -- timeToFullCharge() also reports 0 when not actively charging.
+    local apiValue = charging and hs.battery.timeToFullCharge()
+                              or hs.battery.timeRemaining()
+    if apiValue and apiValue > 0 then
+        return apiValue
+    end
+
+    -- Layers 2 & 3: workaround for the broken API.
+    local sb = readSmartBattery() or {}
+    -- 65535 (0xFFFF) and 0 are the firmware's "not available" sentinels.
+    local function firmwareValid(t) return t ~= nil and t > 0 and t < 65535 end
+    local amperage = hs.battery.amperage() -- signed mA: <0 discharging, >0 charging
+    if charging then
+        if firmwareValid(sb.avgToFull) then return sb.avgToFull end
+        if sb.full and sb.remaining and amperage and amperage > 0 then
+            return (sb.full - sb.remaining) / amperage * 60
+        end
+    else
+        if firmwareValid(sb.avgToEmpty) then return sb.avgToEmpty end
+        if sb.remaining and amperage and amperage < 0 then
+            return sb.remaining / math.abs(amperage) * 60
+        end
+    end
+    return nil
+end
+
 local function batteryPercentage()
     local res = math.floor(hs.battery.percentage()) .. "%, "
     local source = hs.battery.powerSource()
     if source == "AC Power" then
-        res = res .. "Charging. "
-        local timeRemaining = hs.battery.timeToFullCharge()
-        if timeRemaining == -1 then
-            res = res .. "Calculating time remaining until full."
+        if hs.battery.isCharging() then
+            res = res .. "Charging. "
+            local mins = batteryMinutesRemaining(true)
+            if mins then
+                res = res .. minutesToHours(mins) .. " until full."
+            else
+                res = res .. "Calculating time until full."
+            end
         else
-            res = res .. minutesToHours(timeRemaining) .. " until full."
+            res = res .. "Plugged in, not charging."
         end
     elseif source == "Battery Power" then
         res = res .. "Not charging. "
-        local timeRemaining = hs.battery.timeRemaining()
-        if timeRemaining == -1 then
-            res = res .. "Calculating time until empty."
+        local mins = batteryMinutesRemaining(false)
+        if mins then
+            res = res .. minutesToHours(mins) .. " until empty."
         else
-            res = res .. minutesToHours(timeRemaining) .. " until empty."
+            res = res .. "Calculating time until empty."
         end
     else
-        res = "Unable to obtain battery percentage."
+        res = "Unable to obtain battery information."
     end
     speak(res)
 end
