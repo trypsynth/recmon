@@ -94,8 +94,24 @@ local function diskUsage()
     speak(res)
 end
 
-local function osVersion()
-    speak(hs.host.operatingSystemVersionString())
+-- macOS's name, version and build, e.g. "macOS Golden Gate, 27.0.1, build
+-- 26A434". The system doesn't store the marketing name anywhere readable on
+-- macOS 27 (not in the licence, the About pane's strings or the install
+-- history), so it comes from this table; add new releases here.
+local macOSNames = {
+    [11] = "Big Sur", [12] = "Monterey", [13] = "Ventura", [14] = "Sonoma",
+    [15] = "Sequoia", [26] = "Tahoe", [27] = "Golden Gate",
+}
+
+local function macOSVersion()
+    local info = hs.plist.read("/System/Library/CoreServices/SystemVersion.plist") or {}
+    local version = info.ProductVersion or ""
+    local major = tonumber(version:match("^(%d+)"))
+    local name = major and macOSNames[major]
+    local extra = info.ProductVersionExtra and (" " .. info.ProductVersionExtra) or ""
+    local res = "macOS" .. (name and (" " .. name) or "") .. ", " .. version .. extra
+    if info.ProductBuildVersion then res = res .. ", build " .. info.ProductBuildVersion end
+    speak(res .. ".")
 end
 
 local function uptime()
@@ -127,24 +143,71 @@ local function batteryPercentage()
     speak(res)
 end
 
-local function audioDevices()
-    local inputDevice = hs.audiodevice.defaultInputDevice()
-    local res = "Input: "
-        .. inputDevice:name()
-        .. " (volume "
-        .. math.floor(inputDevice:volume())
-        .. "%)"
-    if inputDevice:muted() then
-        res = res .. " Muted"
-    end
-    local outputDevice = hs.audiodevice.defaultOutputDevice()
-    res = res
-        .. ". Output: "
-        .. outputDevice:name()
-        .. " ("
-        .. math.floor(outputDevice:volume())
-        .. "%)."
-    speak(res)
+local function deviceReport(label, device)
+    if not device then return "No " .. label:lower() .. " device." end
+    local res = label .. ": " .. device:name()
+    local volume = device:volume()
+    if volume then res = res .. ", volume " .. math.floor(volume + 0.5) .. "%" end
+    if device:muted() then res = res .. ", muted" end
+    return res .. "."
+end
+
+local function outputDevice()
+    speak(deviceReport("Output", hs.audiodevice.defaultOutputDevice()))
+end
+
+local function inputDevice()
+    speak(deviceReport("Input", hs.audiodevice.defaultInputDevice()))
+end
+
+-- The five processes using the most CPU right now. `top` takes a fresh
+-- one-second sample, like Activity Monitor (`ps` alone reports a smoothed
+-- average over the last minute or so), run in the background so Hammerspoon
+-- doesn't wait. Names come from the app a process belongs to where there is
+-- one, otherwise the full process name.
+local friendlyProcessNames = {
+    ["com.apple.WebKit.WebContent"] = "Web page content",
+    ["com.apple.WebKit.GPU"] = "Web graphics",
+    ["com.apple.WebKit.Networking"] = "Web networking",
+}
+
+local function processName(pid)
+    local app = hs.application.applicationForPID(pid)
+    if app and app:name() then return app:name() end
+    local comm = hs.execute("/bin/ps -o comm= -p " .. pid) or ""
+    comm = comm:gsub("%s+$", ""):match("([^/]+)$") or ""
+    return friendlyProcessNames[comm] or comm, comm
+end
+
+local topTask
+local function topProcesses()
+    if topTask and topTask:isRunning() then return end
+    topTask = hs.task.new("/usr/bin/top", function(exitCode, stdout)
+        if exitCode ~= 0 or not stdout then
+            speak("Couldn't read processes.")
+            return
+        end
+        -- Two samples; the first has no CPU figures yet, so use the second.
+        local samples, rows = 0, {}
+        for line in stdout:gmatch("[^\n]+") do
+            if line:match("^PID") then
+                samples = samples + 1
+            elseif samples == 2 then
+                local pid, cpu = line:match("^%s*(%d+)%s+([%d%.]+)")
+                if pid then table.insert(rows, {pid = tonumber(pid), cpu = tonumber(cpu)}) end
+            end
+        end
+        local parts = {}
+        for _, row in ipairs(rows) do
+            local name, comm = processName(row.pid)
+            if comm ~= "top" and name ~= "" then
+                table.insert(parts, name .. " " .. math.floor(row.cpu + 0.5) .. "%")
+            end
+            if #parts == 5 then break end
+        end
+        speak(#parts > 0 and ("Top processes: " .. table.concat(parts, ", ") .. ".") or "No processes found.")
+    end, {"-l", "2", "-s", "1", "-o", "cpu", "-n", "7", "-stats", "pid,cpu"})
+    topTask:start()
 end
 
 local function pasteboard()
@@ -162,37 +225,27 @@ local function pasteboard()
     end
 end
 
-local cpuHotkey = hs.hotkey.new("ctrl-shift", "1", cpuUsage)
-local ramHotkey = hs.hotkey.new("ctrl-shift", "2", ramUsage)
-local diskHotkey = hs.hotkey.new("ctrl-shift", "3", diskUsage)
-local osHotkey = hs.hotkey.new("ctrl-shift", "4", osVersion)
-local uptimeHotkey = hs.hotkey.new("ctrl-shift", "5", uptime)
-local batteryHotkey = hs.hotkey.new("ctrl-shift", "6", batteryPercentage)
-local audioDeviceHotkey = hs.hotkey.new("ctrl-shift", "7", audioDevices)
-local pasteboardHotkey = hs.hotkey.new("ctrl-shift", "8", pasteboard)
+local hotkeys = {
+    hs.hotkey.new("ctrl-shift", "1", cpuUsage),
+    hs.hotkey.new("ctrl-shift", "2", ramUsage),
+    hs.hotkey.new("ctrl-shift", "3", diskUsage),
+    hs.hotkey.new("ctrl-shift", "4", macOSVersion),
+    hs.hotkey.new("ctrl-shift", "5", uptime),
+    hs.hotkey.new("ctrl-shift", "6", batteryPercentage),
+    hs.hotkey.new("ctrl-shift", "7", outputDevice),
+    hs.hotkey.new("ctrl-shift", "8", inputDevice),
+    hs.hotkey.new("ctrl-shift", "9", pasteboard),
+    hs.hotkey.new("ctrl-shift", "0", topProcesses),
+}
 
 function recmon.init() end
 
 function recmon.start()
-    cpuHotkey:enable()
-    ramHotkey:enable()
-    diskHotkey:enable()
-    osHotkey:enable()
-    uptimeHotkey:enable()
-    batteryHotkey:enable()
-    audioDeviceHotkey:enable()
-    pasteboardHotkey:enable()
+    for _, hotkey in ipairs(hotkeys) do hotkey:enable() end
 end
 
 function recmon.stop()
-    cpuHotkey:disable()
-    ramHotkey:disable()
-    diskHotkey:disable()
-    osHotkey:disable()
-    uptimeHotkey:disable()
-    batteryHotkey:disable()
-    audioDeviceHotkey:disable()
-    pasteboardHotkey:disable()
+    for _, hotkey in ipairs(hotkeys) do hotkey:disable() end
 end
 
 return recmon
