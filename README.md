@@ -30,11 +30,13 @@ To use each feature, simply press ctrl+shift+the number next to it.
 1. Speak average CPU load, and how its distributed.
 2. Speak RAM usage (not working yet, see todo).
 3. Speak storage information about all connected drives.
-4. Speak OS version.
+4. Speak the macOS version: its name, version number and build, e.g. "macOS Golden Gate, 27.0.1, build 26A434". The name comes from a table in the spoon, as macOS doesn't store it anywhere readable; add new releases there.
 5. Speak system uptime.
 6. Speak battery percentage, state, and time remaining.
-7. Speak information about your default input/output devices, their volume, and in the case of your input device, if its muted or not.
-8. Speak the text that's currently on your clipboard/pasteboard (if any).
+7. Speak your default output device, its volume, and whether it's muted.
+8. Speak your default input device, its volume, and whether it's muted.
+9. Speak the text that's currently on your clipboard/pasteboard (if any).
+0. Speak the five processes using the most CPU, with their percentages. This takes about a second, as it samples CPU use fresh, like Activity Monitor does. Percentages can go over 100%, since a process can use more than one core. An app with several processes can appear more than once: Safari, for example, runs separate "Safari Web Content" processes for different web pages, so two busy pages show as two entries.
 
 ## Todo
 
